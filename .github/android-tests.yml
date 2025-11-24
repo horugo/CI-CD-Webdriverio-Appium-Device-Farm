@@ -1,0 +1,92 @@
+name: Android Automation Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout do código
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '24'
+        cache: 'npm'
+
+    - name: Instalar dependências
+      run: npm ci
+
+    - name: Setup Java
+      uses: actions/setup-java@v3
+      with:
+        java-version: '11'
+        distribution: 'temurin'
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Aceitar licenças Android
+      run: |
+        yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
+
+    - name: Instalar platform Android 10
+      run: |
+        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-29" "system-images;android-29;google_apis;x86_64"
+
+    - name: Criar e iniciar emulador Android 10
+      uses: reactivecircus/android-emulator-runner@v2
+      with:
+        api-level: 29
+        target: google_apis
+        arch: x86_64
+        profile: Pixel 3
+        force-avd-creation: true
+        emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+        disable-animations: true
+
+    - name: Verificar emulador
+      run: |
+        adb devices
+        adb shell getprop ro.build.version.release
+        adb shell getprop ro.product.model
+
+    - name: Instalar e iniciar Appium
+      run: |
+        npm install -g appium
+        appium --log-level info --session-override --allow-insecure chromedriver_autodownload &
+        sleep 15
+
+    - name: Verificar se app existe
+      run: |
+        echo "📱 Verificando arquivo do app..."
+        if [ -f "app/android/flutter.apk" ]; then
+          echo "✅ App encontrado: app/android/flutter.apk"
+          ls -la app/android/flutter.apk
+        else
+          echo "❌ App NÃO encontrado!"
+          find . -name "*.apk" | head -10
+          exit 1
+        fi
+
+    - name: Executar testes WebdriverIO
+      run: npm run wdio
+      timeout-minutes: 30
+      env:
+        CI: true
+
+    - name: Upload artifacts em caso de falha
+      if: failure()
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-failure-logs
+        path: |
+          screenshots/
+          logs/
+        retention-days: 7
