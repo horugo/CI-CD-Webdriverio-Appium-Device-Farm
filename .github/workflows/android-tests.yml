@@ -32,13 +32,18 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v2
 
+    - name: Listar devices disponíveis
+      run: |
+        $ANDROID_HOME/cmdline-tools/latest/bin/avdmanager list device
+
     - name: Criar e iniciar emulador Android 10
       uses: reactivecircus/android-emulator-runner@v2
       with:
         api-level: 29
         target: google_apis
         arch: x86_64
-        profile: Pixel 4
+        # REMOVA o profile ou use um que existe
+        # profile: Pixel 4  # ⛔ REMOVER ESTA LINHA
         force-avd-creation: true
         emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
         disable-animations: true
