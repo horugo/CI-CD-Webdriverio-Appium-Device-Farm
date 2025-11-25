@@ -29,26 +29,89 @@ jobs:
         java-version: '21'
         distribution: 'temurin'
 
-    - name: Iniciar Emulador Android com Action Confiável
-      uses: actions/emulator-tool@v1
-      with:
-        api-level: 33
-        target: google_apis
-        arch: x86_64
-        profile: Pixel 4
-        avd-name: test-avd
-        force-avd-creation: true
-        emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -memory 2048 -accel auto
-        disable-animations: true
-        script: |
-          echo "📱 Emulador está rodando!"
-          adb devices
-          adb shell getprop ro.build.version.release
-          adb shell getprop sys.boot_completed
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v2
 
-    - name: Configurar ambiente de teste
+    - name: Instalar Android 33 (mais estável)
       run: |
-        echo "⚙️ Configurando ambiente..."
+        yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
+        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-33"
+        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "system-images;android-33;google_apis;x86_64"
+        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "emulator" "platform-tools"
+
+    - name: Criar AVD de forma confiável
+      run: |
+        # Criar AVD sem device específico (mais confiável)
+        echo "no" | $ANDROID_HOME/cmdline-tools/latest/bin/avdmanager create avd \
+          -n test_avd \
+          -k "system-images;android-33;google_apis;x86_64" \
+          -f
+        
+        # Verificar se foi criado
+        echo "📱 AVDs disponíveis:"
+        $ANDROID_HOME/cmdline-tools/latest/bin/avdmanager list avd
+
+    - name: Iniciar emulador de forma robusta
+      run: |
+        # Configurar environment variables corretamente
+        export ANDROID_AVD_HOME=$HOME/.android/avd
+        export ANDROID_SDK_HOME=$HOME/.android
+        
+        echo "🚀 Iniciando emulador..."
+        nohup $ANDROID_HOME/emulator/emulator \
+          -avd test_avd \
+          -no-window \
+          -no-audio \
+          -no-snapshot \
+          -gpu swiftshader_indirect \
+          -memory 2048 \
+          -netdelay none \
+          -netspeed full > emulator.log 2>&1 &
+        
+        EMULATOR_PID=$!
+        echo "EMULATOR_PID=$EMULATOR_PID" >> $GITHUB_ENV
+        
+        # Aguardar inicialização
+        echo "⏳ Aguardando emulador inicializar..."
+        sleep 60
+        
+        # Verificar se está rodando
+        if ps -p $EMULATOR_PID > /dev/null; then
+          echo "✅ Processo do emulador está rodando (PID: $EMULATOR_PID)"
+        else
+          echo "❌ Emulador não está rodando"
+          echo "📄 Log do emulador:"
+          cat emulator.log || echo "Sem log disponível"
+          exit 1
+        fi
+
+    - name: Aguardar e verificar emulador
+      run: |
+        echo "🔍 Verificando estado do emulador..."
+        
+        # Tentar conectar via ADB
+        adb devices
+        adb wait-for-device
+        
+        # Aguardar boot com timeout
+        echo "🔄 Aguardando boot completo (máx 3 minutos)..."
+        for i in {1..36}; do
+          if adb shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; then
+            echo "✅ Boot completado após ${i}0 segundos!"
+            break
+          fi
+          echo "⏳ Aguardando... ($i/36)"
+          sleep 10
+        done
+        
+        # Verificar estado final
+        echo "📊 Estado final:"
+        adb shell getprop sys.boot_completed || echo "❌ Boot não completou"
+        adb shell getprop ro.build.version.release || echo "❌ Não conseguiu acessar propriedades"
+
+    - name: Configurar ambiente
+      run: |
+        echo "⚙️ Configurando ambiente Android..."
         adb shell settings put global window_animation_scale 0.0
         adb shell settings put global transition_animation_scale 0.0
         adb shell settings put global animator_duration_scale 0.0
@@ -58,23 +121,32 @@ jobs:
       run: |
         npm install -g appium
         appium --log-level info --session-override --allow-insecure chromedriver_autodownload &
-        sleep 15
+        sleep 20
         echo "✅ Appium iniciado"
 
     - name: Verificar se app existe
       run: |
         if [ -f "app/android/flutter.apk" ]; then
           echo "✅ App encontrado: app/android/flutter.apk"
-          ls -la app/android/flutter.apk
+          echo "📏 Tamanho: $(du -h app/android/flutter.apk | cut -f1)"
         else
-          echo "❌ App NÃO encontrado em app/android/flutter.apk"
-          echo "📁 Procurando APKs..."
-          find . -name "*.apk" | head -10
+          echo "❌ App NÃO encontrado!"
+          echo "📁 Estrutura do projeto:"
+          find . -type f -name "*.apk" -o -name "wdio.conf.*" -o -name "package.json" | head -20
           exit 1
         fi
 
     - name: Executar testes WebdriverIO
       run: npm run wdio
-      timeout-minutes: 10
+      timeout-minutes: 15
       env:
         CI: true
+
+    - name: Parar emulador
+      if: always()
+      run: |
+        echo "🛑 Parando emulador..."
+        kill -9 $EMULATOR_PID 2>/dev/null || true
+        adb emu kill 2>/dev/null || true
+        pkill -f emulator 2>/dev/null || true
+        echo "✅ Cleanup completo"
