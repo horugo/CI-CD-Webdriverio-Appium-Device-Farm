@@ -32,88 +32,126 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v2
 
-    - name: Instalar Android 10 e emulador
+    - name: Verificar ambiente Android
       run: |
-        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-29" 
-        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "system-images;android-29;google_apis;x86_64"
+        echo "📱 Android Home: $ANDROID_HOME"
+        echo "📱 Android SDK Root: $ANDROID_SDK_ROOT"
+        ls -la $ANDROID_HOME
+
+    - name: Instalar componentes Android necessários
+      run: |
+        # Aceitar licenças primeiro
+        yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
+        
+        # Instalar componentes específicos
+        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platform-tools"
+        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-33"
+        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "system-images;android-33;google_apis;x86_64"
         $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "emulator"
 
-    - name: Criar AVD com Pixel 4
+    - name: Listar AVDs disponíveis
       run: |
+        $ANDROID_HOME/cmdline-tools/latest/bin/avdmanager list avd
+
+    - name: Criar AVD manualmente com configuração explícita
+      run: |
+        # Criar diretório AVD se não existir
+        mkdir -p $HOME/.android/avd
+        
+        # Criar AVD
         echo "no" | $ANDROID_HOME/cmdline-tools/latest/bin/avdmanager create avd \
-          -n test \
-          -k "system-images;android-29;google_apis;x86_64" \
+          -n android33_avd \
+          -k "system-images;android-33;google_apis;x86_64" \
           -d "pixel_4" \
           -f
-        echo "✅ AVD Pixel 4 criado com sucesso!"
+        
+        # Verificar se foi criado
+        echo "📱 AVDs criados:"
+        $ANDROID_HOME/cmdline-tools/latest/bin/avdmanager list avd
+        
+        # Listar arquivos do AVD
+        echo "📁 Conteúdo do diretório AVD:"
+        ls -la $HOME/.android/avd/
 
-    - name: Iniciar emulador com timeout
+    - name: Iniciar emulador
       run: |
-        # Iniciar emulador em background
+        # Configurar variáveis de ambiente
+        export ANDROID_AVD_HOME=$HOME/.android/avd
+        export ANDROID_SDK_HOME=$HOME/.android
+        
+        echo "🚀 Iniciando emulador..."
         $ANDROID_HOME/emulator/emulator \
-          -avd test \
+          -avd android33_avd \
           -no-window \
           -no-audio \
           -no-snapshot \
           -gpu swiftshader_indirect \
           -memory 2048 \
-          -accel auto &
+          -netdelay none \
+          -netspeed full &
         
         EMULATOR_PID=$!
         echo "EMULATOR_PID=$EMULATOR_PID" >> $GITHUB_ENV
         
-        # Aguardar máximo 3 minutos com checks melhores
-        timeout 180s bash -c '
-          until adb shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; do
-            echo "⏳ Aguardando emulador bootar..."
-            sleep 10
-          done
-          echo "✅ Emulador boot completo!"
-        ' || echo "⚠️ Timeout - continuando mesmo sem boot completo"
-
-    - name: Verificar estado do emulador
-      run: |
-        echo "📱 Verificando estado do emulador:"
+        # Aguardar o emulador inicializar
+        echo "⏳ Aguardando emulador..."
+        sleep 30
+        
+        # Tentar conectar
         adb devices
-        adb shell getprop ro.build.version.release || echo "❌ Não conseguiu acessar propriedades"
-        adb shell getprop sys.boot_completed || echo "❌ Boot não completado totalmente"
-        adb shell input keyevent 82 || echo "⚠️ Não conseguiu enviar keyevent"
+        adb wait-for-device
+        
+        echo "✅ Emulador inicializado!"
 
-    - name: Configurar ambiente Android
+    - name: Aguardar boot completo
       run: |
-        # Desativar animações para testes mais rápidos
+        echo "🔄 Aguardando boot completo..."
+        # Aguardar até 2 minutos pelo boot
+        for i in {1..24}; do
+          if adb shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; then
+            echo "✅ Boot completado!"
+            break
+          fi
+          echo "⏳ Aguardando boot... ($i/24)"
+          sleep 5
+        done
+        
+        # Verificar estado final
+        adb shell getprop sys.boot_completed || echo "⚠️ Boot não completou totalmente"
+
+    - name: Configurar ambiente de teste
+      run: |
+        echo "⚙️ Configurando ambiente..."
         adb shell settings put global window_animation_scale 0.0
         adb shell settings put global transition_animation_scale 0.0
         adb shell settings put global animator_duration_scale 0.0
         adb shell settings put secure show_ime_with_hard_keyboard 0
-        echo "✅ Ambiente Android configurado"
+        echo "✅ Ambiente configurado"
 
     - name: Instalar e iniciar Appium
       run: |
         npm install -g appium
         appium --log-level info --session-override --allow-insecure chromedriver_autodownload &
-        sleep 15
+        sleep 10
         echo "✅ Appium iniciado"
 
     - name: Verificar se app existe
       run: |
         if [ -f "app/android/flutter.apk" ]; then
-          echo "✅ App encontrado!"
+          echo "✅ App encontrado: app/android/flutter.apk"
           ls -la app/android/flutter.apk
-          echo "Tamanho do APK: $(du -h app/android/flutter.apk | cut -f1)"
         else
-          echo "❌ App NÃO encontrado!"
-          echo "Procurando APKs..."
-          find . -name "*.apk" | head -10
+          echo "❌ App NÃO encontrado em app/android/flutter.apk"
+          echo "📁 Estrutura do projeto:"
+          find . -name "*.apk" -o -name "*.txt" -o -name "*.json" | head -20
           exit 1
         fi
 
     - name: Executar testes WebdriverIO
       run: npm run wdio
-      timeout-minutes: 15
+      timeout-minutes: 10
       env:
         CI: true
-        NODE_ENV: ci
 
     - name: Parar emulador
       if: always()
@@ -121,4 +159,4 @@ jobs:
         echo "🛑 Parando emulador..."
         kill -9 $EMULATOR_PID 2>/dev/null || true
         adb emu kill 2>/dev/null || true
-        echo "✅ Emulador parado"
+        echo "✅ Cleanup completo"
