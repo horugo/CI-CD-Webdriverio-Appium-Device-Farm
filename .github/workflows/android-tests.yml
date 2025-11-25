@@ -30,52 +30,32 @@ jobs:
         distribution: 'temurin'
 
     - name: Setup Android SDK
-      uses: android-actions/setup-android@v2  # ✅ Versão correta
+      uses: android-actions/setup-android@v2
 
-    - name: Instalar Android Command Line Tools
-      run: |
-        wget -q https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
-        mkdir -p $ANDROID_HOME/cmdline-tools
-        unzip -q commandlinetools-linux-9477386_latest.zip -d $ANDROID_HOME/cmdline-tools
-        mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
-
-    - name: Aceitar licenças Android
-      run: |
-        yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
-
-    - name: Instalar Android 10 e emulador
-      run: |
-        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-29" "system-images;android-29;google_apis;x86_64" "emulator" "platform-tools"
-
-    - name: Criar AVD
-      run: |
-        echo "no" | $ANDROID_HOME/cmdline-tools/latest/bin/avdmanager create avd -n test_avd -k "system-images;android-29;google_apis;x86_64" -d "pixel_4"
-
-    - name: Iniciar emulador
-      run: |
-        $ANDROID_HOME/emulator/emulator -avd test_avd -no-window -no-audio -no-snapshot -gpu swiftshader_indirect &
-        sleep 30
-
-    - name: Aguardar emulador ficar pronto
-      run: |
-        adb wait-for-device
-        while [ "`adb shell getprop sys.boot_completed | tr -d '\r' `" != "1" ]; do
-          sleep 5
-          echo "⏳ Aguardando emulador..."
-        done
-        echo "✅ Emulador pronto!"
+    - name: Criar e iniciar emulador Android 10
+      uses: reactivecircus/android-emulator-runner@v2
+      with:
+        api-level: 29
+        target: google_apis
+        arch: x86_64
+        profile: Pixel 4
+        force-avd-creation: true
+        emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+        disable-animations: true
 
     - name: Verificar emulador
       run: |
         adb devices
         adb shell getprop ro.build.version.release
-        adb shell getprop ro.product.model
+        adb shell settings put global window_animation_scale 0.0
+        adb shell settings put global transition_animation_scale 0.0
+        adb shell settings put global animator_duration_scale 0.0
 
     - name: Instalar e iniciar Appium
       run: |
         npm install -g appium
         appium --log-level info --session-override --allow-insecure chromedriver_autodownload &
-        sleep 10
+        sleep 15
 
     - name: Verificar se app existe
       run: |
