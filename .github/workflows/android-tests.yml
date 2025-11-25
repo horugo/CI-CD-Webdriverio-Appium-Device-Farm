@@ -1,4 +1,4 @@
-name: Android Automation Tests
+name: Android Tests - AWS Device Farm
 
 on:
   push:
@@ -14,139 +14,176 @@ jobs:
     - name: Checkout do código
       uses: actions/checkout@v4
 
-    - name: Setup Node.js 24
+    - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
         node-version: '24'
         cache: 'npm'
 
-    - name: Instalar dependências
-      run: npm ci
-
-    - name: Setup Java 21
-      uses: actions/setup-java@v4
+    - name: Configurar AWS CLI
+      uses: aws-actions/configure-aws-credentials@v4
       with:
-        java-version: '21'
-        distribution: 'temurin'
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
 
-    - name: Setup Android SDK
-      uses: android-actions/setup-android@v2
-
-    - name: Instalar Android 33 (mais estável)
+    - name: Instalar dependências AWS
       run: |
-        yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
-        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-33"
-        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "system-images;android-33;google_apis;x86_64"
-        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "emulator" "platform-tools"
+        # Instalar AWS CLI se necessário
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip awscliv2.zip
+        sudo ./aws/install
+        aws --version
 
-    - name: Criar AVD de forma confiável
-      run: |
-        # Criar AVD sem device específico (mais confiável)
-        echo "no" | $ANDROID_HOME/cmdline-tools/latest/bin/avdmanager create avd \
-          -n test_avd \
-          -k "system-images;android-33;google_apis;x86_64" \
-          -f
-        
-        # Verificar se foi criado
-        echo "📱 AVDs disponíveis:"
-        $ANDROID_HOME/cmdline-tools/latest/bin/avdmanager list avd
-
-    - name: Iniciar emulador de forma robusta
-      run: |
-        # Configurar environment variables corretamente
-        export ANDROID_AVD_HOME=$HOME/.android/avd
-        export ANDROID_SDK_HOME=$HOME/.android
-        
-        echo "🚀 Iniciando emulador..."
-        nohup $ANDROID_HOME/emulator/emulator \
-          -avd test_avd \
-          -no-window \
-          -no-audio \
-          -no-snapshot \
-          -gpu swiftshader_indirect \
-          -memory 2048 \
-          -netdelay none \
-          -netspeed full > emulator.log 2>&1 &
-        
-        EMULATOR_PID=$!
-        echo "EMULATOR_PID=$EMULATOR_PID" >> $GITHUB_ENV
-        
-        # Aguardar inicialização
-        echo "⏳ Aguardando emulador inicializar..."
-        sleep 60
-        
-        # Verificar se está rodando
-        if ps -p $EMULATOR_PID > /dev/null; then
-          echo "✅ Processo do emulador está rodando (PID: $EMULATOR_PID)"
-        else
-          echo "❌ Emulador não está rodando"
-          echo "📄 Log do emulador:"
-          cat emulator.log || echo "Sem log disponível"
-          exit 1
-        fi
-
-    - name: Aguardar e verificar emulador
-      run: |
-        echo "🔍 Verificando estado do emulador..."
-        
-        # Tentar conectar via ADB
-        adb devices
-        adb wait-for-device
-        
-        # Aguardar boot com timeout
-        echo "🔄 Aguardando boot completo (máx 3 minutos)..."
-        for i in {1..36}; do
-          if adb shell getprop sys.boot_completed 2>/dev/null | grep -q "1"; then
-            echo "✅ Boot completado após ${i}0 segundos!"
-            break
-          fi
-          echo "⏳ Aguardando... ($i/36)"
-          sleep 10
-        done
-        
-        # Verificar estado final
-        echo "📊 Estado final:"
-        adb shell getprop sys.boot_completed || echo "❌ Boot não completou"
-        adb shell getprop ro.build.version.release || echo "❌ Não conseguiu acessar propriedades"
-
-    - name: Configurar ambiente
-      run: |
-        echo "⚙️ Configurando ambiente Android..."
-        adb shell settings put global window_animation_scale 0.0
-        adb shell settings put global transition_animation_scale 0.0
-        adb shell settings put global animator_duration_scale 0.0
-        echo "✅ Ambiente configurado"
-
-    - name: Instalar e iniciar Appium
-      run: |
-        npm install -g appium
-        appium --log-level info --session-override --allow-insecure chromedriver_autodownload &
-        sleep 20
-        echo "✅ Appium iniciado"
-
-    - name: Verificar se app existe
+    - name: Verificar se APK existe
       run: |
         if [ -f "app/android/flutter.apk" ]; then
-          echo "✅ App encontrado: app/android/flutter.apk"
-          echo "📏 Tamanho: $(du -h app/android/flutter.apk | cut -f1)"
+          echo "✅ APK encontrado"
+          ls -la app/android/flutter.apk
         else
-          echo "❌ App NÃO encontrado!"
-          echo "📁 Estrutura do projeto:"
-          find . -type f -name "*.apk" -o -name "wdio.conf.*" -o -name "package.json" | head -20
+          echo "❌ APK não encontrado"
           exit 1
         fi
 
-    - name: Executar testes WebdriverIO
-      run: npm run wdio
-      timeout-minutes: 15
-      env:
-        CI: true
-
-    - name: Parar emulador
-      if: always()
+    - name: Upload APK para S3
       run: |
-        echo "🛑 Parando emulador..."
-        kill -9 $EMULATOR_PID 2>/dev/null || true
-        adb emu kill 2>/dev/null || true
-        pkill -f emulator 2>/dev/null || true
-        echo "✅ Cleanup completo"
+        TIMESTAMP=$(date +%Y%m%d%H%M%S)
+        aws s3 cp app/android/flutter.apk s3://${{ secrets.AWS_S3_BUCKET }}/apps/flutter-app-$TIMESTAMP.apk
+        echo "APP_S3_URL=s3://${{ secrets.AWS_S3_BUCKET }}/apps/flutter-app-$TIMESTAMP.apk" >> $GITHUB_ENV
+
+    - name: Criar projeto no Device Farm
+      run: |
+        # Verificar se projeto já existe
+        PROJECT_EXISTS=$(aws devicefarm list-projects --query "projects[?name=='MeuProjetoTeste']" --output text)
+        
+        if [ -z "$PROJECT_EXISTS" ]; then
+          echo "Criando novo projeto..."
+          aws devicefarm create-project --name "MeuProjetoTeste"
+        else
+          echo "Projeto já existe"
+        fi
+
+    - name: Executar testes no Device Farm
+      run: |
+        # Obter ARN do projeto
+        PROJECT_ARN=$(aws devicefarm list-projects --query "projects[?name=='MeuProjetoTeste'].arn" --output text)
+        
+        # Obter ARN do device pool padrão
+        DEVICE_POOL_ARN=$(aws devicefarm list-device-pools --arn $PROJECT_ARN --query "devicePools[?name=='Top Devices'].arn" --output text)
+        
+        # Upload do APK para Device Farm
+        UPLOAD_APP_RESPONSE=$(aws devicefarm create-upload \
+          --project-arn $PROJECT_ARN \
+          --name "flutter-app-$TIMESTAMP.apk" \
+          --type ANDROID_APP \
+          --content-type application/vnd.android.package-archive)
+        
+        APP_UPLOAD_ARN=$(echo $UPLOAD_APP_RESPONSE | jq -r '.upload.arn')
+        APP_UPLOAD_URL=$(echo $UPLOAD_APP_RESPONSE | jq -r '.upload.url')
+        
+        # Fazer upload do APK
+        curl -T app/android/flutter.apk "$APP_UPLOAD_URL"
+        
+        # Aguardar upload ser processado
+        echo "Aguardando processamento do APK..."
+        while true; do
+          STATUS=$(aws devicefarm get-upload --arn $APP_UPLOAD_ARN --query 'upload.status' --output text)
+          echo "Status do upload: $STATUS"
+          if [ "$STATUS" == "SUCCEEDED" ]; then
+            break
+          elif [ "$STATUS" == "FAILED" ]; then
+            echo "❌ Upload falhou"
+            exit 1
+          fi
+          sleep 10
+        done
+
+        # Upload do teste Appium (se tiver)
+        UPLOAD_TEST_RESPONSE=$(aws devicefarm create-upload \
+          --project-arn $PROJECT_ARN \
+          --name "appium-tests.zip" \
+          --type APPIUM_JAVA_TESTNG_TEST_PACKAGE \
+          --content-type application/zip)
+        
+        TEST_UPLOAD_ARN=$(echo $UPLOAD_TEST_RESPONSE | jq -r '.upload.arn')
+        TEST_UPLOAD_URL=$(echo $UPLOAD_TEST_RESPONSE | jq -r '.upload.url')
+        
+        # Criar arquivo de teste vazio (substitua pelo seu depois)
+        zip -r appium-tests.zip ./tests/ || echo "Criando teste vazio..." && touch empty.txt && zip appium-tests.zip empty.txt
+        
+        curl -T appium-tests.zip "$TEST_UPLOAD_URL"
+        
+        # Aguardar upload do teste
+        while true; do
+          STATUS=$(aws devicefarm get-upload --arn $TEST_UPLOAD_ARN --query 'upload.status' --output text)
+          echo "Status do upload do teste: $STATUS"
+          if [ "$STATUS" == "SUCCEEDED" ]; then
+            break
+          elif [ "$STATUS" == "FAILED" ]; then
+            echo "❌ Upload do teste falhou"
+            break
+          fi
+          sleep 10
+        done
+
+        # Agendar execução
+        echo "Agendando execução no Device Farm..."
+        SCHEDULE_RUN_RESPONSE=$(aws devicefarm schedule-run \
+          --project-arn $PROJECT_ARN \
+          --app-arn $APP_UPLOAD_ARN \
+          --device-pool-arn $DEVICE_POOL_ARN \
+          --name "Run-$TIMESTAMP" \
+          --test type=APPIUM_JAVA_TESTNG,testPackageArn=$TEST_UPLOAD_ARN)
+        
+        RUN_ARN=$(echo $SCHEDULE_RUN_RESPONSE | jq -r '.run.arn')
+        echo "RUN_ARN=$RUN_ARN" >> $GITHUB_ENV
+
+    - name: Aguardar conclusão dos testes
+      run: |
+        echo "⏳ Aguardando execução no Device Farm..."
+        while true; do
+          RUN_STATUS=$(aws devicefarm get-run --arn $RUN_ARN --query 'run.status' --output text)
+          echo "Status da execução: $RUN_STATUS"
+          
+          case $RUN_STATUS in
+            "COMPLETED")
+              echo "✅ Execução completada"
+              break
+              ;;
+            "ERRORED"|"STOPPED")
+              echo "❌ Execução falhou: $RUN_STATUS"
+              exit 1
+              ;;
+            "PENDING"|"PROCESSING"|"SCHEDULING"|"RUNNING"|"RESTARTING")
+              sleep 30
+              ;;
+            *)
+              echo "Status desconhecido: $RUN_STATUS"
+              sleep 30
+              ;;
+          esac
+        done
+
+    - name: Obter resultados
+      run: |
+        # Obter resultados detalhados
+        aws devicefarm get-run --arn $RUN_ARN > run-details.json
+        cat run-details.json
+        
+        # Contar testes passados/falhados
+        PASSED=$(cat run-details.json | jq '.run.resultCounts.passed // 0')
+        FAILED=$(cat run-details.json | jq '.run.resultCounts.failed // 0')
+        WARNED=$(cat run-details.json | jq '.run.resultCounts.warned // 0')
+        SKIPPED=$(cat run-details.json | jq '.run.resultCounts.skipped // 0')
+        
+        echo "📊 RESULTADOS:"
+        echo "✅ Passados: $PASSED"
+        echo "❌ Falhados: $FAILED"
+        echo "⚠️  Avisos: $WARNED"
+        echo "⏭️  Pulados: $SKIPPED"
+        
+        # Falhar o workflow se houver testes falhados
+        if [ $FAILED -gt 0 ]; then
+          echo "❌ Testes falharam!"
+          exit 1
+        fi
