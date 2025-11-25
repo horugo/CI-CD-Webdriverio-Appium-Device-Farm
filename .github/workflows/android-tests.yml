@@ -24,13 +24,13 @@ jobs:
       run: npm ci
 
     - name: Setup Java
-      uses: actions/setup-java@v3
+      uses: actions/setup-java@v4
       with:
         java-version: '21'
         distribution: 'temurin'
 
     - name: Setup Android SDK
-      uses: android-actions/setup-android@v3
+      uses: android-actions/setup-android@v4
 
     - name: Aceitar licenças Android
       run: |
@@ -83,7 +83,7 @@ jobs:
 
     - name: Upload artifacts em caso de falha
       if: failure()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: test-failure-logs
         path: |
