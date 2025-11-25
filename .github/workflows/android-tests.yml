@@ -42,11 +42,13 @@ jobs:
         force-avd-creation: true
         emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
         disable-animations: true
+        script: |
+          echo "📱 Emulador está pronto!"
+          adb devices
+          adb shell getprop ro.build.version.release
 
-    - name: Verificar emulador
+    - name: Configurar animações desligadas
       run: |
-        adb devices
-        adb shell getprop ro.build.version.release
         adb shell settings put global window_animation_scale 0.0
         adb shell settings put global transition_animation_scale 0.0
         adb shell settings put global animator_duration_scale 0.0
