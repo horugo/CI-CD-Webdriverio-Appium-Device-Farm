@@ -1,0 +1,163 @@
+name: AWS Device Farm - Google Pixel 9
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout do código
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js 24
+      uses: actions/setup-node@v4
+      with:
+        node-version: '24'
+        cache: 'npm'
+
+    - name: Setup Java 21
+      uses: actions/setup-java@v4
+      with:
+        java-version: '21'
+        distribution: 'temurin'
+
+    - name: Instalar dependências
+      run: npm ci
+
+    - name: Configurar AWS
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Instalar AWS CLI e jq
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y jq
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip awscliv2.zip
+        sudo ./aws/install
+        aws --version
+
+    - name: Verificar APK
+      id: verify-apk
+      run: |
+        if [ -f "app/android/flutter.apk" ]; then
+          echo "✅ APK encontrado! Tamanho: $(du -h app/android/flutter.apk | cut -f1)"
+          echo "APK_EXISTS=true" >> $GITHUB_ENV
+        else
+          echo "❌ APK não encontrado!"
+          echo "APK_EXISTS=false" >> $GITHUB_ENV
+          exit 1
+        fi
+
+    - name: Upload APK para Device Farm
+      id: upload-apk
+      run: |
+        TIMESTAMP=$(date +%Y%m%d%H%M%S)
+        echo "📤 Upload do APK..."
+
+        PROJECT_ARN=${{ secrets.DEVICE_FARM_PROJECT_ARN }}
+        UPLOAD_RESPONSE=$(aws devicefarm create-upload \
+          --project-arn "$PROJECT_ARN" \
+          --name "flutter-app-$TIMESTAMP.apk" \
+          --type ANDROID_APP \
+          --region ${{ secrets.AWS_REGION }})
+
+        UPLOAD_ARN=$(echo $UPLOAD_RESPONSE | jq -r '.upload.arn')
+        UPLOAD_URL=$(echo $UPLOAD_RESPONSE | jq -r '.upload.url')
+
+        if [ -n "$UPLOAD_ARN" ] && [ "$UPLOAD_ARN" != "null" ]; then
+          echo "UPLOAD_ARN=$UPLOAD_ARN" >> $GITHUB_ENV
+          curl -X PUT -T app/android/flutter.apk "$UPLOAD_URL"
+          echo "✅ Upload concluído!"
+        else
+          echo "❌ Falha ao criar upload"
+          exit 1
+        fi
+
+    - name: Aguardar processamento do APK
+      id: process-apk
+      run: |
+        echo "⏳ Processando APK..."
+        for i in {1..30}; do
+          STATUS=$(aws devicefarm get-upload \
+            --arn $UPLOAD_ARN \
+            --region ${{ secrets.AWS_REGION }} \
+            --query 'upload.status' \
+            --output text)
+
+          echo "Status: $STATUS ($i/30)"
+
+          if [ "$STATUS" == "SUCCEEDED" ]; then
+            echo "✅ APK processado!"
+            break
+          elif [ "$STATUS" == "FAILED" ]; then
+            echo "❌ Falha no APK"
+            exit 1
+          fi
+          sleep 10
+        done
+
+    - name: Executar teste (usando Device Pool existente)
+      id: run-test
+      run: |
+        echo "🚀 Agendando execução no Device Farm..."
+        PROJECT_ARN=${{ secrets.DEVICE_FARM_PROJECT_ARN }}
+        DEVICE_POOL_ARN=${{ secrets.DEVICE_FARM_DEVICE_POOL_ARN }}
+        RUN_RESPONSE=$(aws devicefarm schedule-run \
+          --project-arn "$PROJECT_ARN" \
+          --app-arn $UPLOAD_ARN \
+          --device-pool-arn "$DEVICE_POOL_ARN" \
+          --name "GitHubActions-Run-$(date +%Y%m%d%H%M%S)" \
+          --test type=BUILTIN_FUZZ \
+          --region ${{ secrets.AWS_REGION }})
+
+        RUN_ARN=$(echo $RUN_RESPONSE | jq -r '.run.arn')
+
+        if [ -n "$RUN_ARN" ] && [ "$RUN_ARN" != "null" ]; then
+          echo "RUN_ARN=$RUN_ARN" >> $GITHUB_ENV
+          echo "✅ Teste agendado!"
+        else
+          echo "❌ Falha ao agendar teste"
+          exit 1
+        fi
+
+    - name: Aguardar conclusão
+      id: wait-completion
+      run: |
+        echo "⏳ Aguardando conclusão do run..."
+        for i in {1..60}; do
+          STATUS=$(aws devicefarm get-run \
+            --arn $RUN_ARN \
+            --region ${{ secrets.AWS_REGION }} \
+            --query 'run.status' \
+            --output text)
+
+          echo "Status: $STATUS ($i/60)"
+
+          if [ "$STATUS" == "COMPLETED" ]; then
+            echo "🎉 Teste concluído!"
+            break
+          elif [ "$STATUS" == "ERRORED" ] || [ "$STATUS" == "STOPPED" ]; then
+            echo "❌ Teste falhou"
+            exit 1
+          fi
+          sleep 30
+        done
+
+    - name: Verificar resultados detalhados
+      if: env.RUN_ARN != ''
+      run: |
+        echo "📊 Resultados do run:"
+        RUN_DETAILS=$(aws devicefarm get-run \
+          --arn "$RUN_ARN" \
+          --region ${{ secrets.AWS_REGION }})
+
+        echo "$RUN_DETAILS" | jq '.run | {device: .device.name, os: .device.os, status: .status, result: .result}'
