@@ -34,7 +34,7 @@ jobs:
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: us-west-2
+        aws-region: ${{ secrets.AWS_REGION }}
 
     - name: Instalar AWS CLI e jq
       run: |
@@ -57,202 +57,107 @@ jobs:
           exit 1
         fi
 
-    - name: Obter ARN do Google Pixel 9
-      id: get-device
-      run: |
-        echo "🔍 Buscando Google Pixel 9..."
-        DEVICE_RESPONSE=$(aws devicefarm list-devices \
-          --region us-west-2 \
-          --query "devices[?name=='Google Pixel 9'].{arn:arn, name:name, os:os}" \
-          --output json)
-        
-        echo "Devices encontrados: $DEVICE_RESPONSE"
-        
-        PIXEL9_ARN=$(echo $DEVICE_RESPONSE | jq -r '.[0].arn')
-        
-        if [ -n "$PIXEL9_ARN" ] && [ "$PIXEL9_ARN" != "null" ]; then
-          echo "✅ Google Pixel 9 encontrado!"
-          echo "PIXEL9_ARN=$PIXEL9_ARN" >> $GITHUB_ENV
-          echo "DEVICE_FOUND=true" >> $GITHUB_ENV
-        else
-          echo "❌ Google Pixel 9 não encontrado"
-          echo "DEVICE_FOUND=false" >> $GITHUB_ENV
-          exit 1
-        fi
-
-    - name: Criar Device Pool para Google Pixel 9
-      id: create-pool
-      if: env.DEVICE_FOUND == 'true'
-      run: |
-        echo "🏗️ Criando Device Pool customizado..."
-        POOL_RESPONSE=$(aws devicefarm create-device-pool \
-          --project-arn "arn:aws:devicefarm:us-west-2:593793055311:project:35f719fe-a34d-49e8-8984-a0c79d15efba" \
-          --name "Google-Pixel-9-Only-$(date +%s)" \
-          --description "Device pool exclusivo para Google Pixel 9" \
-          --rules '[]' \
-          --region us-west-2)
-        
-        POOL_ARN=$(echo $POOL_RESPONSE | jq -r '.devicePool.arn')
-        
-        if [ -n "$POOL_ARN" ] && [ "$POOL_ARN" != "null" ]; then
-          echo "✅ Device Pool criado: $POOL_ARN"
-          echo "POOL_ARN=$POOL_ARN" >> $GITHUB_ENV
-          echo "POOL_CREATED=true" >> $GITHUB_ENV
-          
-          # Adicionar Google Pixel 9 ao pool
-          echo "📱 Adicionando Google Pixel 9 ao pool..."
-          aws devicefarm update-device-pool \
-            --arn $POOL_ARN \
-            --devices-to-add $PIXEL9_ARN \
-            --region us-west-2
-        else
-          echo "❌ Falha ao criar Device Pool"
-          echo "POOL_CREATED=false" >> $GITHUB_ENV
-          exit 1
-        fi
-
     - name: Upload APK para Device Farm
       id: upload-apk
-      if: env.POOL_CREATED == 'true'
       run: |
         TIMESTAMP=$(date +%Y%m%d%H%M%S)
         echo "📤 Upload do APK..."
-        
+
+        PROJECT_ARN=${{ secrets.DEVICE_FARM_PROJECT_ARN }}
         UPLOAD_RESPONSE=$(aws devicefarm create-upload \
-          --project-arn "arn:aws:devicefarm:us-west-2:593793055311:project:35f719fe-a34d-49e8-8984-a0c79d15efba" \
+          --project-arn "$PROJECT_ARN" \
           --name "flutter-app-$TIMESTAMP.apk" \
           --type ANDROID_APP \
-          --region us-west-2)
-        
+          --region ${{ secrets.AWS_REGION }})
+
         UPLOAD_ARN=$(echo $UPLOAD_RESPONSE | jq -r '.upload.arn')
         UPLOAD_URL=$(echo $UPLOAD_RESPONSE | jq -r '.upload.url')
-        
+
         if [ -n "$UPLOAD_ARN" ] && [ "$UPLOAD_ARN" != "null" ]; then
           echo "UPLOAD_ARN=$UPLOAD_ARN" >> $GITHUB_ENV
-          echo "UPLOAD_CREATED=true" >> $GITHUB_ENV
           curl -X PUT -T app/android/flutter.apk "$UPLOAD_URL"
           echo "✅ Upload concluído!"
         else
           echo "❌ Falha ao criar upload"
-          echo "UPLOAD_CREATED=false" >> $GITHUB_ENV
           exit 1
         fi
 
     - name: Aguardar processamento do APK
       id: process-apk
-      if: env.UPLOAD_CREATED == 'true'
       run: |
         echo "⏳ Processando APK..."
         for i in {1..30}; do
           STATUS=$(aws devicefarm get-upload \
             --arn $UPLOAD_ARN \
-            --region us-west-2 \
+            --region ${{ secrets.AWS_REGION }} \
             --query 'upload.status' \
             --output text)
-          
+
           echo "Status: $STATUS ($i/30)"
-          
+
           if [ "$STATUS" == "SUCCEEDED" ]; then
             echo "✅ APK processado!"
-            echo "APK_PROCESSED=true" >> $GITHUB_ENV
             break
           elif [ "$STATUS" == "FAILED" ]; then
             echo "❌ Falha no APK"
-            echo "APK_PROCESSED=false" >> $GITHUB_ENV
             exit 1
           fi
           sleep 10
         done
 
-    - name: Executar teste no Google Pixel 9
+    - name: Executar teste (usando Device Pool existente)
       id: run-test
-      if: env.APK_PROCESSED == 'true'
       run: |
-        echo "🚀 Executando no Google Pixel 9..."
-        
+        echo "🚀 Agendando execução no Device Farm..."
+        PROJECT_ARN=${{ secrets.DEVICE_FARM_PROJECT_ARN }}
+        DEVICE_POOL_ARN=${{ secrets.DEVICE_FARM_DEVICE_POOL_ARN }}
         RUN_RESPONSE=$(aws devicefarm schedule-run \
-          --project-arn "arn:aws:devicefarm:us-west-2:593793055311:project:35f719fe-a34d-49e8-8984-a0c79d15efba" \
+          --project-arn "$PROJECT_ARN" \
           --app-arn $UPLOAD_ARN \
-          --device-pool-arn $POOL_ARN \
-          --name "Pixel9-Test-$(date +%Y%m%d%H%M%S)" \
+          --device-pool-arn "$DEVICE_POOL_ARN" \
+          --name "GitHubActions-Run-$(date +%Y%m%d%H%M%S)" \
           --test type=BUILTIN_FUZZ \
-          --region us-west-2)
-        
+          --region ${{ secrets.AWS_REGION }})
+
         RUN_ARN=$(echo $RUN_RESPONSE | jq -r '.run.arn')
-        
+
         if [ -n "$RUN_ARN" ] && [ "$RUN_ARN" != "null" ]; then
           echo "RUN_ARN=$RUN_ARN" >> $GITHUB_ENV
-          echo "RUN_CREATED=true" >> $GITHUB_ENV
-          echo "✅ Teste agendado no Google Pixel 9!"
+          echo "✅ Teste agendado!"
         else
           echo "❌ Falha ao agendar teste"
-          echo "RUN_CREATED=false" >> $GITHUB_ENV
           exit 1
         fi
 
     - name: Aguardar conclusão
       id: wait-completion
-      if: env.RUN_CREATED == 'true'
       run: |
-        echo "⏳ Aguardando teste no Google Pixel 9..."
+        echo "⏳ Aguardando conclusão do run..."
         for i in {1..60}; do
           STATUS=$(aws devicefarm get-run \
             --arn $RUN_ARN \
-            --region us-west-2 \
+            --region ${{ secrets.AWS_REGION }} \
             --query 'run.status' \
             --output text)
-          
+
           echo "Status: $STATUS ($i/60)"
-          
+
           if [ "$STATUS" == "COMPLETED" ]; then
             echo "🎉 Teste concluído!"
-            echo "RUN_COMPLETED=true" >> $GITHUB_ENV
             break
           elif [ "$STATUS" == "ERRORED" ] || [ "$STATUS" == "STOPPED" ]; then
             echo "❌ Teste falhou"
-            echo "RUN_COMPLETED=false" >> $GITHUB_ENV
             exit 1
           fi
           sleep 30
         done
 
     - name: Verificar resultados detalhados
-      if: env.RUN_ARN != '' && env.RUN_COMPLETED == 'true'
+      if: env.RUN_ARN != ''
       run: |
-        echo "📊 Resultados do Google Pixel 9:"
-        
-        # Verificar se RUN_ARN existe
-        if [ -z "$RUN_ARN" ]; then
-          echo "❌ RUN_ARN está vazio"
-          exit 1
-        fi
-        
+        echo "📊 Resultados do run:"
         RUN_DETAILS=$(aws devicefarm get-run \
           --arn "$RUN_ARN" \
-          --region us-west-2)
-        
-        echo "Resultado do teste:"
+          --region ${{ secrets.AWS_REGION }})
+
         echo "$RUN_DETAILS" | jq '.run | {device: .device.name, os: .device.os, status: .status, result: .result}'
-
-    - name: Debug - Verificar variáveis
-      if: always()
-      run: |
-        echo "🔍 DEBUG - Variáveis de ambiente:"
-        echo "APK_EXISTS: ${{ env.APK_EXISTS || 'N/A' }}"
-        echo "DEVICE_FOUND: ${{ env.DEVICE_FOUND || 'N/A' }}"
-        echo "POOL_CREATED: ${{ env.POOL_CREATED || 'N/A' }}"
-        echo "UPLOAD_CREATED: ${{ env.UPLOAD_CREATED || 'N/A' }}"
-        echo "APK_PROCESSED: ${{ env.APK_PROCESSED || 'N/A' }}"
-        echo "RUN_CREATED: ${{ env.RUN_CREATED || 'N/A' }}"
-        echo "RUN_COMPLETED: ${{ env.RUN_COMPLETED || 'N/A' }}"
-        echo "RUN_ARN: ${{ env.RUN_ARN || 'NÃO DEFINIDO' }}"
-        echo "POOL_ARN: ${{ env.POOL_ARN || 'NÃO DEFINIDO' }}"
-
-    - name: Limpar Device Pool
-      if: env.POOL_ARN != ''
-      run: |
-        echo "🧹 Limpando Device Pool customizado..."
-        aws devicefarm delete-device-pool \
-          --arn "$POOL_ARN" \
-          --region us-west-2 \
-          || echo "⚠️ Não foi possível deletar o pool"
