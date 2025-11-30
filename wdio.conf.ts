@@ -1,4 +1,4 @@
-const path = require('path');
+//const path = require('path');
 
 export const config: WebdriverIO.Config = {
     //
@@ -56,21 +56,17 @@ export const config: WebdriverIO.Config = {
     // https://saucelabs.com/platform/platform-configurator
     //
     capabilities: [{
-        // 'appium:platformName': 'Android',
-        // 'appium:platformVersion' : '10.0',
-        // 'appium:deviceName' : 'Pixe3',
-        // 'appium:automationName' : 'UIAutomator2',
-        // 'appium:app': path.join(process.cwd(), 'app/android/flutter.apk')
-        'appium:platformName': 'Android',
-        'appium:platformVersion': process.env.CI ? '10' : '10.0', // No CI usa 10, local 10.0
-        'appium:deviceName': process.env.CI ? 'Android Emulator' : 'Pixe3',
-        'appium:automationName': 'UIAutomator2',
-        'appium:app': path.join(process.cwd(), 'app/android/flutter.apk'),
-        'appium:appWaitActivity': '*', // Adicione isso para Flutter
-        'appium:autoGrantPermissions': true,
-        'appium:newCommandTimeout': 300,
-        'appium:avdReadyTimeout': 60000,
-        'appium:androidInstallTimeout': 90000
+        platformName: 'Android',
+        'appium:deviceName': 'Google Pixel.*',
+        'appium:platformVersion': '.*',
+        'appium:app': process.env.BROWSERSTACK_APP_ID,
+        'bstack:options': {
+            userName: process.env.BROWSERSTACK_USERNAME,
+            accessKey: process.env.BROWSERSTACK_ACCESS_KEY,
+            projectName: 'Seu Projeto',
+            buildName: 'GitHub Actions Build',
+            sessionName: 'Android App Test'
+  }
     }],
 
     //
