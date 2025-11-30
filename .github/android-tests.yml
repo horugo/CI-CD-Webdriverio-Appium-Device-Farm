@@ -1,4 +1,4 @@
-name: Android Automation Tests
+name: Android Automation Tests (AWS Device Farm)
 
 on:
   push:
@@ -7,9 +7,11 @@ on:
     branches: [ main ]
 
 jobs:
-  test:
+  device-farm-run:
+    name: Build APK and run tests on AWS Device Farm
     runs-on: ubuntu-latest
-    
+    # NOTE: keep workflow minimal — only values actually used by the scripts
+
     steps:
     - name: Checkout do código
       uses: actions/checkout@v4
@@ -26,67 +28,117 @@ jobs:
     - name: Setup Java
       uses: actions/setup-java@v3
       with:
-        java-version: '11'
+        java-version: '21'
         distribution: 'temurin'
 
-    - name: Setup Android SDK
-      uses: android-actions/setup-android@v3
-
-    - name: Aceitar licenças Android
+    - name: Build Android APK (Gradle)
+      working-directory: app/android
       run: |
-        yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
+        chmod +x gradlew || true
+        ./gradlew assembleDebug --no-daemon
 
-    - name: Instalar platform Android 10
+    - name: Prepare test package (zip)
       run: |
-        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-29" "system-images;android-29;google_apis;x86_64"
+        echo "Preparando pacote de testes..."
+        rm -f tests.zip
+        # Incluir package.json, wdio config e pasta de testes
+        zip -r tests.zip package.json package-lock.json wdio.conf.ts test || true
 
-    - name: Criar e iniciar emulador Android 10
-      uses: reactivecircus/android-emulator-runner@v2
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
       with:
-        api-level: 29
-        target: google_apis
-        arch: x86_64
-        profile: Pixel 3
-        force-avd-creation: true
-        emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-        disable-animations: true
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
 
-    - name: Verificar emulador
+    - name: Install AWS CLI and utilities
       run: |
-        adb devices
-        adb shell getprop ro.build.version.release
-        adb shell getprop ro.product.model
+        sudo apt-get update -y
+        sudo apt-get install -y jq zip unzip
+        python3 -m pip install --upgrade awscli
 
-    - name: Instalar e iniciar Appium
+    - name: Upload APK to Device Farm
+      id: upload_app
       run: |
-        npm install -g appium
-        appium --log-level info --session-override --allow-insecure chromedriver_autodownload &
-        sleep 15
-
-    - name: Verificar se app existe
-      run: |
-        echo "📱 Verificando arquivo do app..."
-        if [ -f "app/android/flutter.apk" ]; then
-          echo "✅ App encontrado: app/android/flutter.apk"
-          ls -la app/android/flutter.apk
+        set -e
+        PROJECT_ARN=${{ secrets.DEVICE_FARM_PROJECT_ARN }}
+        APK_PATH="app/android/app/build/outputs/apk/debug/app-debug.apk"
+        if [ -f "$APK_PATH" ]; then
+          APK_FILE="$APK_PATH"
         else
-          echo "❌ App NÃO encontrado!"
-          find . -name "*.apk" | head -10
-          exit 1
+          APK_FILE=$(find . -name "*.apk" | head -n 1)
         fi
+        echo "Usando APK: $APK_FILE"
+        UPLOAD_JSON=$(aws devicefarm create-upload --project-arn "$PROJECT_ARN" --name "$(basename $APK_FILE)" --type ANDROID_APP)
+        APP_UPLOAD_ARN=$(echo "$UPLOAD_JSON" | jq -r '.upload.arn')
+        APP_UPLOAD_URL=$(echo "$UPLOAD_JSON" | jq -r '.upload.url')
+        curl -T "$APK_FILE" "$APP_UPLOAD_URL"
+        # Poll upload status
+        for i in $(seq 1 120); do
+          status=$(aws devicefarm get-upload --arn "$APP_UPLOAD_ARN" --query upload.status --output text)
+          echo "Upload status: $status"
+          if [ "$status" = "SUCCEEDED" ]; then break; fi
+          if [ "$status" = "FAILED" ]; then echo "Upload do APK falhou"; exit 1; fi
+          sleep 10
+        done
+        echo "app_upload_arn=$APP_UPLOAD_ARN" >> $GITHUB_OUTPUT
 
-    - name: Executar testes WebdriverIO
-      run: npm run wdio
-      timeout-minutes: 30
-      env:
-        CI: true
+    - name: Upload test package to Device Farm
+      id: upload_tests
+      run: |
+        set -e
+        PROJECT_ARN=${{ secrets.DEVICE_FARM_PROJECT_ARN }}
+        TEST_ZIP=tests.zip
+        if [ ! -f "$TEST_ZIP" ]; then echo "Arquivo de testes $TEST_ZIP não encontrado"; exit 1; fi
+        UPLOAD_JSON=$(aws devicefarm create-upload --project-arn "$PROJECT_ARN" --name "${TEST_ZIP}" --type APPIUM_NODE_TEST_PACKAGE)
+        TEST_UPLOAD_ARN=$(echo "$UPLOAD_JSON" | jq -r '.upload.arn')
+        TEST_UPLOAD_URL=$(echo "$UPLOAD_JSON" | jq -r '.upload.url')
+        curl -T "$TEST_ZIP" "$TEST_UPLOAD_URL"
+        for i in $(seq 1 120); do
+          status=$(aws devicefarm get-upload --arn "$TEST_UPLOAD_ARN" --query upload.status --output text)
+          echo "Test upload status: $status"
+          if [ "$status" = "SUCCEEDED" ]; then break; fi
+          if [ "$status" = "FAILED" ]; then echo "Upload dos testes falhou"; exit 1; fi
+          sleep 10
+        done
+        echo "test_upload_arn=$TEST_UPLOAD_ARN" >> $GITHUB_OUTPUT
 
-    - name: Upload artifacts em caso de falha
-      if: failure()
-      uses: actions/upload-artifact@v3
-      with:
-        name: test-failure-logs
-        path: |
-          screenshots/
-          logs/
-        retention-days: 7
+    - name: Schedule Device Farm run
+      id: schedule_run
+      run: |
+        set -e
+        PROJECT_ARN=${{ secrets.DEVICE_FARM_PROJECT_ARN }}
+        DEVICE_POOL_ARN=${{ secrets.DEVICE_FARM_DEVICE_POOL_ARN }}
+        APP_UPLOAD_ARN=${{ steps.upload_app.outputs.app_upload_arn }}
+        TEST_UPLOAD_ARN=${{ steps.upload_tests.outputs.test_upload_arn }}
+        RUN_NAME="GitHubActions-$GITHUB_RUN_ID"
+        echo "Agendando run: $RUN_NAME"
+        RUN_JSON=$(aws devicefarm schedule-run --project-arn "$PROJECT_ARN" --app-arn "$APP_UPLOAD_ARN" --device-pool-arn "$DEVICE_POOL_ARN" --name "$RUN_NAME" --test type=APPIUM_NODE_TEST_PACKAGE,testPackageArn="$TEST_UPLOAD_ARN")
+        RUN_ARN=$(echo "$RUN_JSON" | jq -r '.run.arn')
+        echo "run_arn=$RUN_ARN" >> $GITHUB_OUTPUT
+
+    - name: Wait for Device Farm run to complete
+      run: |
+        set -e
+        RUN_ARN=${{ steps.schedule_run.outputs.run_arn }}
+        echo "Aguardando conclusão do run: $RUN_ARN"
+        for i in $(seq 1 120); do
+          status=$(aws devicefarm get-run --arn "$RUN_ARN" --query run.status --output text)
+          result=$(aws devicefarm get-run --arn "$RUN_ARN" --query run.result --output text)
+          echo "status=$status result=$result"
+          if [ "$status" = "COMPLETED" ]; then
+            echo "Run finalizado com resultado: $result"
+            if [ "$result" != "PASSED" ]; then exit 1; fi
+            break
+          fi
+          if [ "$status" = "ERRORED" ] || [ "$status" = "PENDING" -a $i -eq 120 ]; then
+            echo "Run terminou em estado inesperado: $status"
+            exit 1
+          fi
+          sleep 10
+        done
+
+    - name: Download artifacts (optional)
+      if: always()
+      run: |
+        echo "Se quiser baixar artefatos, use 'aws devicefarm list-artifacts' com o run ARN"
