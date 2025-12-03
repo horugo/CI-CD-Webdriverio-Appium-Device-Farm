@@ -1,4 +1,4 @@
-//const path = require('path');
+const path = require('path');
 
 export const config: WebdriverIO.Config = {
     //
@@ -56,17 +56,11 @@ export const config: WebdriverIO.Config = {
     // https://saucelabs.com/platform/platform-configurator
     //
     capabilities: [{
-        platformName: 'Android',
-        'appium:deviceName': 'Google Pixel.*',
-        'appium:platformVersion': '.*',
-        'appium:app': process.env.BROWSERSTACK_APP_ID,
-        'bstack:options': {
-            userName: process.env.BROWSERSTACK_USERNAME,
-            accessKey: process.env.BROWSERSTACK_ACCESS_KEY,
-            projectName: 'Seu Projeto',
-            buildName: 'GitHub Actions Build',
-            sessionName: 'Android App Test'
-  }
+        'appium:platformName' : 'Android',
+        'appium:platformVersion' : '10',
+        'appium:deviceName' : 'Pixel 3',
+        'appium:automationName' : 'UIAutomator2',
+        'appium:app': path.join(process.cwd(), 'app/android/ApiDemos-debug.apk')
     }],
 
     //
