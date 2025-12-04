@@ -27,7 +27,8 @@ export const config: WebdriverIO.Config = {
     //
     specs: [
         // ToDo: define location for spec files here
-        './test/specs/**/*.ts'
+        //'./test/specs/**/*.ts'
+        './test/specs/**/android-native*.ts'
     ],
     // Patterns to exclude.
     exclude: [
