@@ -28,7 +28,7 @@ export const config: WebdriverIO.Config = {
     specs: [
         // ToDo: define location for spec files here
         //'./test/specs/**/*.ts'
-        './test/specs/**/android-native*.ts'
+        './test/specs/android/**/*.ts'
     ],
     // Patterns to exclude.
     exclude: [
@@ -61,7 +61,8 @@ export const config: WebdriverIO.Config = {
         'appium:platformVersion' : '10',
         'appium:deviceName' : 'Pixel 3',
         'appium:automationName' : 'UIAutomator2',
-        'appium:app': path.join(process.cwd(), 'app/android/ApiDemos-debug.apk')
+        'appium:app': path.join(process.cwd(), 'app/android/ColorNote+Notepad.apk'),
+        'appium:autoGrantPermissions': true
     }],
 
     //
